@@ -1,0 +1,12 @@
+{
+  "name": "xedux",
+  "version": "1.0.0",
+  "description": "Predictable State Container with elegant and simple API",
+  "main": "index.js",
+  "github": "https://github.com/MananTank/xedux",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "author": "Manan Tank",
+  "license": "ISC"
+}

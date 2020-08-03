@@ -1,46 +1,37 @@
-import {
-	INVALID_VERB_ERROR,
-	NO_REACTIVE_CALCULATOR,
-	CYCLIC_DEPENDENCY_ERROR,
-	INVALID_DEP_ERROR,
-	NO_INIT_VALUE_ERROR,
-} from './errors';
+import * as errors from './helpers/errors';
+import hasCyclicDeps from './helpers/cyclicDeps';
+import clone from './helpers/clone';
+import deepEqual from './helpers/deepEqual';
 
-import { hasCyclicDeps, simpleDeepClone } from './helpers';
+// TODO: ability to configure subscribe listeners to avoid doing too much work for listeners that do not use that info
 
-const xedux = ({ controllers, savedState, effects }) => {
+const xedux = ({ slices, savedState, effects, middlewares, statics }) => {
 	const state = {};
 	const actionTypeProcessors = {}; // object containing verbs as keys and processor arrays as value
 	const reactives = {}; // object containing key as state key and value is object of shape {  deps: [], reactor: fn() }
-	// let middlewares = []; // array of middleware functions
 	let listeners = []; // array of listener functions
+	let currentActionInfo; // an object which store details about dispatched actions and what changes the action is making in the store
 
-	const notifyListeners = key => {
-		// when key is changed, noify all listeners that 'key' changed
-		listeners.forEach(l => l(key));
+	// to centralize mutation in one place
+	const mutateState = (key, value) => {
+		state[key] = value;
 	};
 
-	const notifyDependants = key => {
-		// key changed, notify all key's dependants that key changed
-		// when any of values that dependant depends on changes, update its value by calling reactor
-		const updateDependant = dependant => {
-			const newValues = dependant.deps.map(d => state[d]);
-			dependant.reactor(...newValues);
+	let dispatch = (actionType, actionData, compName) => {
+		// reset
+		currentActionInfo = {
+			actionType,
+			actionData,
+			component: compName,
+			updatedSlices: {},
 		};
-
-		const dependants = reactives[key];
-		if (!dependants) return;
-		dependants.forEach(updateDependant);
-	};
-
-	const dispatch = (actionType, actionData, compName) => {
 		const processors = actionTypeProcessors[actionType];
-		if (processors === undefined) INVALID_VERB_ERROR(actionType, compName);
-		return processors.map(p => p(actionData)); // execute and return arrays of keys that changed
-		// in most cases this will be an array of only one key, since most of the ime, each action triggers a single reducer
+		if (processors === undefined) errors.INVALID_ACTION_TYPE_ERROR(actionType, compName);
+		processors.forEach(processor => processor(actionData));
+		listeners.forEach(listener => listener(currentActionInfo));
 	};
 
-	const subscribe = listener => {
+	const subscribe = (listener, configure) => {
 		listeners.push(listener);
 		const unsubscribe = () => {
 			listeners = listeners.filter(l => l !== listener);
@@ -49,123 +40,126 @@ const xedux = ({ controllers, savedState, effects }) => {
 		return unsubscribe;
 	};
 
+	const notifyDependentsOfSlice = sliceName => {
+		const dependants = reactives[sliceName];
+		if (!dependants) return;
+		dependants.forEach(dependant => dependant.handleDepsChange());
+	};
+
+	const callReactor = sliceName => {
+		const depsValues = slices[sliceName].deps.map(dep => state[dep]);
+		return slices[sliceName].reactor(...depsValues, statics);
+	};
+
 	// ****************************************
 
 	const addNonReactives = () => {
-		const createProcessor = (key, reducer, actionType) => actionData => {
-			const oldValue = simpleDeepClone(state[key]);
-			let newValue = state[key];
-			const returnedValue = reducer(newValue, actionData);
-			if (returnedValue !== undefined) {
-				newValue = returnedValue;
-			}
+		// create processor
+		const createProcessor = (sliceName, reducer) => {
+			const processor = actionData => {
+				const oldState = state[sliceName];
+				const newState = reducer(state[sliceName], actionData, statics);
+				if (newState === undefined) errors.CAN_NOT_RETURN_UNDEFINED(reducer.name);
 
-			if (oldValue !== newValue) {
-				state[key] = newValue;
-				notifyListeners(key);
-				notifyDependants(key);
-			}
-			return key; // return the key that the processor changed in state
+				if (!deepEqual(oldState, newState)) {
+					mutateState(sliceName, newState);
+					currentActionInfo.updatedSlices[sliceName] = { newState, oldState };
+					notifyDependentsOfSlice(sliceName);
+				}
+			};
+
+			return processor;
 		};
 
-		const buildVerbProcessor = (key, controller) => {
-			for (const actionType in controller.reducers) {
-				const reducer = controller.reducers[actionType]; // get reducer for the actionType from controller
-				if (!actionTypeProcessors[actionType]) actionTypeProcessors[actionType] = []; // if processors array for actionType is undefined, make empty array
-				const processor = createProcessor(key, reducer, actionType); // create a processor for this actionType
-				actionTypeProcessors[actionType].push(processor); // add processor to processors array for procesing actionType
-			}
-
-			for (const actionType in controller.dispatchers) {
-				const reducer = controller.dispatchers[actionType];
-				const dispatcherPorcessor = actionData => {
-					const oldValue = state[key];
-					reducer(dispatch, oldValue, actionData);
-				};
-
-				if (!actionTypeProcessors[actionType]) actionTypeProcessors[actionType] = [];
-				actionTypeProcessors[actionType].push(dispatcherPorcessor);
+		const addProcessors = sliceName => {
+			const reducers = slices[sliceName].reducers;
+			for (const actionType in reducers) {
+				const reducer = reducers[actionType];
+				const processor = createProcessor(sliceName, reducer);
+				if (actionTypeProcessors[actionType] === undefined) actionTypeProcessors[actionType] = [];
+				actionTypeProcessors[actionType].push(processor);
 			}
 		};
 
-		for (const key in controllers) {
-			const controller = controllers[key];
-			if ('deps' in controller) {
-				pendingReactives.push(key);
+		for (const sliceName in slices) {
+			const slice = slices[sliceName];
+			if (slice.deps) {
+				pendingReactives.push(sliceName);
 				continue; // ignore reactives
 			}
-			if (!('initialState' in controller)) NO_INIT_VALUE_ERROR(key);
-			state[key] = controller.initialState;
-			buildVerbProcessor(key, controller); // build actionType processor
+			if (!('initialState' in slice)) errors.NO_INIT_VALUE_ERROR(sliceName);
+			mutateState(sliceName, slice.initialState);
+			addProcessors(sliceName);
 		}
 	};
 
 	const mergeSavedState = () => {
 		if (savedState) {
-			for (const key in savedState) {
-				state[key] = savedState[key];
+			for (const sliceName in savedState) {
+				mutateState(sliceName, savedState[sliceName]);
 			}
 		}
 	};
 
 	const addReactivesToState = () => {
 		// ---
-		const addReactive = (key, deps, controller) => {
-			const handleReactiveChange = (...x) => {
-				state[key] = controller.reactor(...x);
-				notifyListeners(key);
-				notifyDependants(key);
+		const addReactiveProcessor = sliceName => {
+			const handleDepsChange = () => {
+				const oldState = state[sliceName];
+				const newState = callReactor(sliceName);
+				if (newState === undefined) errors.CAN_NOT_RETURN_UNDEFINED(sliceName);
+				if (!deepEqual(oldState, newState)) {
+					mutateState(sliceName, clone(newState));
+					currentActionInfo.updatedSlices[sliceName] = { oldState, newState };
+					notifyDependentsOfSlice(sliceName);
+				}
 			};
 
-			for (const d of deps) {
-				if (reactives[d] === undefined) reactives[d] = [];
-				reactives[d].push({
-					reactor: handleReactiveChange,
-					deps,
+			// make reactive and add in reactives
+			for (const dep of slices[sliceName].deps) {
+				if (reactives[dep] === undefined) reactives[dep] = [];
+				reactives[dep].push({
+					handleDepsChange,
+					deps: slices[sliceName].deps,
 				});
 			}
 		};
 
 		const pendingReactivesHistory = []; // histroy is maintained to figure out cyclic deps
-		if (pendingReactives.length) {
-			pendingReactivesHistory.push([...pendingReactives]);
-		}
 
+		// is there are reactive slices
+		if (pendingReactives.length) pendingReactivesHistory.push([...pendingReactives]);
+
+		// while not all the reactive slices are added in state
 		while (pendingReactives.length) {
-			const key = pendingReactives[0]; // check for reactive key 'key'
-			if (!('reactor' in controllers[key])) NO_REACTIVE_CALCULATOR(key);
-
-			const controller = controllers[key];
+			// pick first sliceName in pending
+			const sliceName = pendingReactives[0]; // check for reactive sliceName 'sliceName'
+			const slice = slices[sliceName];
+			if (!slice.reactor) errors.NO_REACTOR(sliceName);
 
 			let success = true; // sucess, if the reactive's initial could be calculated right away
-			const depsValues = []; // value of keys which the reactive depends on
 
-			for (const d of controller.deps) {
-				if (!(d in controllers)) INVALID_DEP_ERROR(d, key);
+			for (const dep of slice.deps) {
+				if (!slices[dep]) errors.INVALID_DEP_ERROR(dep, sliceName);
 
-				// if dependent value is itself not calculated, move the key to end, to calculate this later
-				if (!(d in state)) {
+				// if dependent value is itself not calculated, move the sliceName to end, to calculate this later
+				if (!(dep in state)) {
 					pendingReactives.shift();
-					pendingReactives.push(key);
+					pendingReactives.push(sliceName);
 					success = false;
 					break;
 				}
-
-				depsValues.push(state[d]); // if dependent value, is availabe, push in deps values
 			}
 
 			// if all of deps value are available, reactive's value can be calculate by calling reactor function
 			if (success) {
-				state[key] = controller.reactor(...depsValues); // resolve initial value and save
-				pendingReactives.shift(); // remove this key from pending, because it's value is now resolved
-				addReactive(key, controller.deps, controller);
+				mutateState(sliceName, callReactor(sliceName));
+				pendingReactives.shift(); // remove this sliceName from pending, because it's value is now resolved
+				addReactiveProcessor(sliceName);
 			}
 
-			// detect cyclic dependencies
-			// if current state of pendingReactives match any of the history we have cyclic dep
-			if (hasCyclicDeps(pendingReactives, pendingReactivesHistory)) {
-				CYCLIC_DEPENDENCY_ERROR(pendingReactives);
-			}
+			if (hasCyclicDeps(pendingReactives, pendingReactivesHistory))
+				errors.CYCLIC_DEPENDENCY_ERROR(pendingReactives);
 
 			pendingReactivesHistory.push([...pendingReactives]);
 		} // while end ---
@@ -183,17 +177,27 @@ const xedux = ({ controllers, savedState, effects }) => {
 		}
 	};
 
+	const addMiddlewares = () => {
+		if (middlewares && middlewares.length) {
+			for (const middleware of middlewares.slice().reverse()) {
+				dispatch = middleware({ dispatch, state });
+			}
+		}
+	};
+
 	// ****************************************
 	const pendingReactives = [];
 	addNonReactives();
 	mergeSavedState();
 	addReactivesToState();
 	addEffects();
+	addMiddlewares();
 
 	return {
 		dispatch,
 		subscribe,
 		state,
+		statics,
 	};
 };
 

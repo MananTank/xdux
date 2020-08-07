@@ -13,26 +13,37 @@ const xedux = ({ slices, savedState, effects, middlewares, statics }) => {
   let listeners = []
   let mutation
   const pendingReactives = []
+  const preprocessors = {}
 
   // to centralize mutation in one place
   const mutateState = (key, value) => {
     state[key] = value
   }
 
-  let dispatch = (actionType, actionData, compName) => {
-    // reset
-    mutation = {
-      actionType,
-      actionData,
-      component: compName,
-      updatedSlices: {}
+  const isValidActionType = actionType => !(actionTypeProcessors[actionType] === undefined)
+
+  let dispatch = (actionType, actionData, options) => {
+    if (!options.preprocessed && preprocessors[actionType]) {
+      preprocessors[actionType](actionData, options)
+    } else {
+      // reset
+      mutation = {
+        actionType,
+        actionData,
+        component: options.component,
+        updatedSlices: {},
+        synthetic: options.synthetic || false
+      }
+
+      if (!isValidActionType(actionType)) {
+        errors.INVALID_ACTION_TYPE_ERROR(actionType, options.component)
+      }
+      const processors = actionTypeProcessors[actionType]
+      processors.forEach(processor => processor(actionData))
+      listeners.forEach(listener => listener(mutation))
+
+      return mutation
     }
-    const processors = actionTypeProcessors[actionType]
-    if (processors === undefined) {
-      errors.INVALID_ACTION_TYPE_ERROR(actionType, compName)
-    }
-    processors.forEach(processor => processor(actionData))
-    listeners.forEach(listener => listener(mutation))
   }
 
   const subscribe = listener => {
@@ -59,10 +70,11 @@ const xedux = ({ slices, savedState, effects, middlewares, statics }) => {
 
   const addNonReactives = () => {
     // create processor
-    const createProcessor = (sliceName, reducer) => {
+    const createProcessor = (sliceName, reducer, actionType) => {
       const processor = actionData => {
         const oldState = state[sliceName]
-        const newState = reducer(state[sliceName], actionData, statics)
+        const newState = reducer(oldState, actionData, statics)
+
         if (newState === undefined) {
           errors.CAN_NOT_RETURN_UNDEFINED(reducer.name)
         }
@@ -81,7 +93,7 @@ const xedux = ({ slices, savedState, effects, middlewares, statics }) => {
       const { reducers } = slices[sliceName]
       for (const actionType in reducers) {
         const reducer = reducers[actionType]
-        const processor = createProcessor(sliceName, reducer)
+        const processor = createProcessor(sliceName, reducer, actionType)
         if (actionTypeProcessors[actionType] === undefined) {
           actionTypeProcessors[actionType] = []
         }
@@ -233,6 +245,23 @@ const xedux = ({ slices, savedState, effects, middlewares, statics }) => {
   addEffects()
   addMiddlewares()
 
+  // add preprocesses
+
+  for (const sliceName in slices) {
+    const preprocess = slices[sliceName].preprocess
+    if (preprocess) {
+      for (const actionType in preprocess) {
+        const preprocessor = (actionData, options) => {
+          const send = processedData => dispatch(actionType, processedData, { ...options, preprocessed: true })
+          preprocess[actionType](actionData, send)
+        }
+
+        // if (!preprocessors[actionType]) preprocessors[actionType] = []
+        preprocessors[actionType] = preprocessor
+      }
+    }
+  }
+
   // save a copy of original initialState;
   const initialState = clone(state)
 
@@ -242,7 +271,8 @@ const xedux = ({ slices, savedState, effects, middlewares, statics }) => {
     state,
     statics,
     syntheticUpdate,
-    syntheticReset
+    syntheticReset,
+    isValidActionType
   }
 }
 

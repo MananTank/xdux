@@ -6,7 +6,7 @@ import deepEqual from './helpers/deepEqual'
 /* TODO: ability to configure subscribe listeners to avoid doing too
  much work for listeners that do not use that info  */
 
-const xedux = ({ slices, savedState, effects, middlewares, statics }) => {
+const xedux = ({ slices, savedState, effects, middlewares, constants }) => {
   const state = {}
   const actionTypeProcessors = {}
   const reactives = {}
@@ -14,6 +14,52 @@ const xedux = ({ slices, savedState, effects, middlewares, statics }) => {
   let mutation
   const pendingReactives = []
   const preprocessors = {}
+
+  const componentUsage = {}
+  // componentX : { sliceNames: [], dispatchers: [], actionTypes: [] }
+
+  // to build stats and memoize dispatchers
+  // this function is called by each component when it re-renders
+  // this function only does its job one time per component
+  // after that data is memoised
+  const addActionTypeUsage = (component, actionTypes) => {
+    if (componentUsage[component] === undefined) {
+      componentUsage[component] = {}
+    }
+
+    // if actionTypes are already defined, do nothing, else add
+    // so this will be executed only 1 time per unique component.
+    // ( even if same component is rendered many times, this will only be executed once )
+    if (componentUsage[component].actionTypes === undefined) {
+      console.log('calc action Types')
+      componentUsage[component].actionTypes = []
+      componentUsage[component].dispatchers = []
+      actionTypes.forEach(actionType => {
+        if (!isValidActionType(actionType)) throw new Error(`Invalid action type "${actionType}" used in useDispatch hook in <${component}/>, no such action type exists`)
+        const dispatcher = (actionData) => dispatch(actionType, actionData, { component })
+        componentUsage[component].actionTypes.push(actionType)
+        componentUsage[component].dispatchers.push(dispatcher)
+      })
+    }
+  }
+
+  const addSliceUsage = (component, sliceName) => {
+    if (componentUsage[component] === undefined) componentUsage[component] = {}
+    if (componentUsage[component].sliceNames === undefined) {
+      componentUsage[component].sliceNames = []
+    }
+    if (!componentUsage[component].sliceNames.includes(sliceName)) {
+      componentUsage[component].sliceNames.push(sliceName)
+    }
+  }
+
+  const addConstUsage = (component, constNames) => {
+    if (componentUsage[component] === undefined) componentUsage[component] = {}
+    if (componentUsage[component].constants === undefined) {
+      componentUsage[component].constants = []
+      componentUsage[component].constants = constNames.map(constName => constants[constName])
+    }
+  }
 
   // to centralize mutation in one place
   const mutateState = (key, value) => {
@@ -63,7 +109,7 @@ const xedux = ({ slices, savedState, effects, middlewares, statics }) => {
 
   const callReactor = sliceName => {
     const depsValues = slices[sliceName].deps.map(dep => state[dep])
-    return slices[sliceName].reactor(...depsValues, statics)
+    return slices[sliceName].reactor(...depsValues, constants)
   }
 
   // ****************************************
@@ -73,7 +119,7 @@ const xedux = ({ slices, savedState, effects, middlewares, statics }) => {
     const createProcessor = (sliceName, reducer, actionType) => {
       const processor = actionData => {
         const oldState = state[sliceName]
-        const newState = reducer(oldState, actionData, statics)
+        const newState = reducer(oldState, actionData, constants)
 
         if (newState === undefined) {
           errors.CAN_NOT_RETURN_UNDEFINED(reducer.name)
@@ -269,10 +315,14 @@ const xedux = ({ slices, savedState, effects, middlewares, statics }) => {
     dispatch,
     subscribe,
     state,
-    statics,
+    constants,
     syntheticUpdate,
     syntheticReset,
-    isValidActionType
+    isValidActionType,
+    componentUsage,
+    addSliceUsage,
+    addActionTypeUsage,
+    addConstUsage
   }
 }
 

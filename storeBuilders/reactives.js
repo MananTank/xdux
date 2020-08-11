@@ -1,82 +1,59 @@
 
-import { CAN_NOT_RETURN_UNDEFINED, NO_REACTOR, INVALID_DEP_ERROR, CYCLIC_DEPENDENCY_ERROR } from '../helpers/errors'
-import shallowEqual from '../helpers/shallowEqual'
-import clone from '../helpers/clone'
-import hasCyclicDeps from '../helpers/cyclicDeps'
-import { produce } from 'immer'
+import { NO_REACTOR, INVALID_DEP_ERROR, CYCLIC_DEPENDENCY_ERROR } from '../utils/errors'
+import hasCyclicDeps from '../utils/cyclicDeps'
 
-const addReactives = (state, slices, reactives, mutateState, mutation, notifyDependentsOfSlice, pendingReactives, constants) => {
-  const callReactor = sliceName => {
-    const depStates = slices[sliceName].deps.map(dep => state[dep])
-    return produce(depStates, draft => {
-      return slices[sliceName].reactor(...draft, constants)
-    })
-  }
+const addReactives = (state, mutateState, callReactor, slices, reliesOn) => {
+  // get reactive slices as initial slices that are not resolved
+  // to resolve means to figure out its initial value
+  // to resolve initial values all of its deps values must be resolved first
+  // since a reactive slice can have another reactive slice as its dependency, that one has to be resolved first
+  const unresolvedSlices = Object.keys(slices).filter(sliceName => slices[sliceName].deps)
 
-  const addReactiveProcessor = sliceName => {
-    const handleDepsChange = () => {
-      const oldState = state[sliceName]
-      const newState = callReactor(sliceName)
-      if (newState === undefined) CAN_NOT_RETURN_UNDEFINED(sliceName)
-      if (!shallowEqual(oldState, newState)) {
-        mutateState(sliceName, clone(newState))
-        mutation.updatedSlices[sliceName] = { oldState, newState }
-        notifyDependentsOfSlice(sliceName)
-      }
-    }
+  // this is for detecting cyclic dependencies, such as a -> b -> c -> a
+  const shiftHistory = [[...unresolvedSlices]]
 
-    for (const dep of slices[sliceName].deps) {
-      if (reactives[dep] === undefined) reactives[dep] = []
-      reactives[dep].push({
-        handleDepsChange,
-        deps: slices[sliceName].deps
-      })
-    }
-  }
-
-  const pendingReactivesHistory = [] // histroy is maintained to figure out cyclic deps
-
-  // is there are reactive slices
-  if (pendingReactives.length) {
-    pendingReactivesHistory.push([...pendingReactives])
-  }
-
-  // while not all the reactive slices are added in state
-  while (pendingReactives.length) {
-    // pick first sliceName in pending
-    const sliceName = pendingReactives[0] // check for reactive sliceName 'sliceName'
+  while (unresolvedSlices.length) {
+    // pick first slice, check if it's deps are resolved, if yes, resolve it
+    // if no, shift the slice to end of array to resolve it later
+    const sliceName = unresolvedSlices[0]
     const slice = slices[sliceName]
     if (!slice.reactor) NO_REACTOR(sliceName)
 
-    let success = true // sucess, if the reactive's initial could be calculated right away
+    // assume it is resolvable
+    let resolvable = true
 
+    // check if any of its dep is unresolved, it is - set resolvable to false, shift the slice to end of array
     for (const dep of slice.deps) {
       if (!slices[dep]) INVALID_DEP_ERROR(dep, sliceName)
 
-      // if dependent value is itself not calculated,
-      // move the sliceName to end, to calculate this later
       if (!(dep in state)) {
-        pendingReactives.shift()
-        pendingReactives.push(sliceName)
-        success = false
+        unresolvedSlices.shift()
+        unresolvedSlices.push(sliceName)
+        resolvable = false
         break
       }
     }
 
-    // if all of deps value are available,
-    // reactive's value can be calculate by calling reactor function
-    if (success) {
+    // if resolvable, resolve the initial value by calling its reactor with deps initial values
+    if (resolvable) {
       mutateState(sliceName, callReactor(sliceName))
-      pendingReactives.shift() // remove this sliceName from pending, because it's value is now resolved
-      addReactiveProcessor(sliceName)
+
+      // add resolved value to state
+      for (const dep of slices[sliceName].deps) {
+        if (reliesOn[dep] === undefined) reliesOn[dep] = []
+        reliesOn[dep].push(sliceName)
+      }
+
+      unresolvedSlices.shift() // now that it is resolved, remove it from unresolved array
     }
 
-    if (hasCyclicDeps(pendingReactives, pendingReactivesHistory)) {
-      CYCLIC_DEPENDENCY_ERROR(pendingReactives)
+    // if history repeats itself, we can cyclic deps - and it can not be resolved
+    if (hasCyclicDeps(unresolvedSlices, shiftHistory)) {
+      CYCLIC_DEPENDENCY_ERROR(unresolvedSlices)
     }
 
-    pendingReactivesHistory.push([...pendingReactives])
-  } // while end ---
+    shiftHistory.push([...unresolvedSlices])
+  }
 }
 
 export default addReactives

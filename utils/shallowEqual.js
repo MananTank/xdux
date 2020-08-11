@@ -1,3 +1,4 @@
+
 /* eslint-disable no-self-compare */
 function is (x, y) {
   if (x === y) {
@@ -7,6 +8,7 @@ function is (x, y) {
   }
 }
 
+// redux's shallow equal
 export default function shallowEqual (objA, objB) {
   if (is(objA, objB)) return true
 

@@ -1,6 +1,6 @@
 {
   "name": "xedux",
-  "version": "4.4.0",
+  "version": "4.5.0",
   "description": "Predictable State Container with elegant, reactive and friendly API",
   "main": "index.js",
   "github": "https://github.com/MananTank/xedux",

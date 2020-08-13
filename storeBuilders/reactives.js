@@ -2,11 +2,12 @@
 import { NO_REACTOR, INVALID_DEP_ERROR, CYCLIC_DEPENDENCY_ERROR } from '../utils/errors'
 import hasCyclicDeps from '../utils/cyclicDeps'
 
-const addReactives = (state, mutateState, callReactor, slices, reliesOn) => {
-  // get reactive slices as initial slices that are not resolved
-  // to resolve means to figure out its initial value
-  // to resolve initial values all of its deps values must be resolved first
-  // since a reactive slice can have another reactive slice as its dependency, that one has to be resolved first
+// get reactive slices as initial slices that are not resolved
+// to resolve means to figure out its initial value
+// to resolve initial values all of its deps values must be resolved first
+// since a reactive slice can have another reactive slice as its dependency, that one has to be resolved first
+
+const addReactives = (state, mutateState, callReactor, slices, dependents) => {
   const unresolvedSlices = Object.keys(slices).filter(sliceName => slices[sliceName].deps)
 
   // this is for detecting cyclic dependencies, such as a -> b -> c -> a
@@ -24,7 +25,7 @@ const addReactives = (state, mutateState, callReactor, slices, reliesOn) => {
 
     // check if any of its dep is unresolved, it is - set resolvable to false, shift the slice to end of array
     for (const dep of slice.deps) {
-      if (!slices[dep]) INVALID_DEP_ERROR(dep, sliceName)
+      if (!(dep in slices)) INVALID_DEP_ERROR(dep, sliceName)
 
       if (!(dep in state)) {
         unresolvedSlices.shift()
@@ -40,8 +41,8 @@ const addReactives = (state, mutateState, callReactor, slices, reliesOn) => {
 
       // add resolved value to state
       for (const dep of slices[sliceName].deps) {
-        if (reliesOn[dep] === undefined) reliesOn[dep] = []
-        reliesOn[dep].push(sliceName)
+        if (dependents[dep] === undefined) dependents[dep] = []
+        dependents[dep].push(sliceName)
       }
 
       unresolvedSlices.shift() // now that it is resolved, remove it from unresolved array
